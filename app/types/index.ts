@@ -6,7 +6,6 @@ import Count from "../models/colyseus-models/count"
 import ExperienceManager from "../models/colyseus-models/experience-manager"
 import { IPokemonRecord } from "../models/colyseus-models/game-record"
 import HistoryItem from "../models/colyseus-models/history-item"
-import LobbyUser from "../models/colyseus-models/lobby-user"
 import Message from "../models/colyseus-models/message"
 import Player from "../models/colyseus-models/player"
 import { Pokemon } from "../models/colyseus-models/pokemon"
@@ -17,7 +16,6 @@ import { TournamentSchema } from "../models/colyseus-models/tournament"
 import { Effects } from "../models/effects"
 import GameRoom from "../rooms/game-room"
 import { ILeaderboardInfo } from "../types/interfaces/LeaderboardInfo"
-import { ISpecialGamePlanned } from "../types/interfaces/Lobby"
 import { Ability } from "./enum/Ability"
 import { DungeonPMDO } from "./enum/Dungeon"
 import { Effect } from "./enum/Effect"
@@ -29,7 +27,8 @@ import {
   Orientation,
   PokemonActionState,
   Rarity,
-  Stat
+  Stat,
+  Team
 } from "./enum/Game"
 import { Item } from "./enum/Item"
 import { Passive } from "./enum/Passive"
@@ -61,6 +60,7 @@ export enum Transfer {
   DRAG_DROP = "DRAG_DROP",
   DRAG_DROP_COMBINE = "DRAG_DROP_COMBINE",
   DRAG_DROP_ITEM = "DRAG_DROP_ITEM",
+  SWITCH_BENCH_AND_BOARD = "SWITCH_BENCH_AND_BOARD",
   SELL_POKEMON = "SELL_POKEMON",
   REMOVE_FROM_SHOP = "REMOVE_FROM_SHOP",
   CHANGE_SELECTED_EMOTION = "CHANGE_SELECTED_EMOTION",
@@ -118,6 +118,7 @@ export enum Transfer {
   PLAYER_INCOME = "PLAYER_INCOME",
   PLAYER_DAMAGE = "PLAYER_DAMAGE",
   ROOMS = "ROOMS",
+  REQUEST_ROOM = "REQUEST_ROOM",
   ADD_ROOM = "ADD_ROOM",
   REMOVE_ROOM = "REMOVE_ROOM",
   ADD_BOT_DATABASE = "ADD_BOT_DATABASE",
@@ -132,7 +133,8 @@ export enum Transfer {
   USER_PROFILE = "USER_PROFILE",
   PICK_BERRY = "PICK_BERRY",
   PRELOAD_MAPS = "PRELOAD_MAPS",
-  NPC_DIALOG = "NPC_DIALOG"
+  NPC_DIALOG = "NPC_DIALOG",
+  HEAP_SNAPSHOT = "HEAP_SNAPSHOT"
 }
 
 export enum AttackSprite {
@@ -252,11 +254,9 @@ export interface IDragDropCombineMessage {
 export interface ICustomLobbyState extends Schema {
   ccu: number
   messages: ArraySchema<Message>
-  users: MapSchema<LobbyUser>
   leaderboard: ILeaderboardInfo[]
   botLeaderboard: ILeaderboardInfo[]
   levelLeaderboard: ILeaderboardInfo[]
-  nextSpecialGame: ISpecialGamePlanned
   tournaments: ArraySchema<TournamentSchema>
   clients: number
 }
@@ -281,6 +281,12 @@ export interface ISimplePlayer {
   synergies:
     | Array<{ name: Synergy; value: number }>
     | ArraySchema<{ name: Synergy; value: number }>
+}
+
+export interface IAfterGamePlayer extends ISimplePlayer {
+  moneyEarned: number
+  playerDamageDealt: number
+  rerollCount: number
 }
 
 export interface IGameHistorySimplePlayer extends ISimplePlayer {
@@ -327,12 +333,13 @@ export interface IPlayer {
   board: MapSchema<Pokemon>
   shop: ArraySchema<Pkm>
   simulationId: string
-  simulationTeamIndex: number
+  team: Team
   experienceManager: ExperienceManager
   synergies: Synergies
   money: number
   life: number
   shopLocked: boolean
+  shopFreeRolls: number
   streak: number
   interest: number
   opponentId: string
@@ -350,7 +357,6 @@ export interface IPlayer {
   role: Role
   itemsProposition: ArraySchema<Item>
   pokemonsProposition: ArraySchema<PkmProposition>
-  rerollCount: number
   loadingProgress: number
   effects: Effects
   isBot: boolean
@@ -363,6 +369,12 @@ export interface IPlayer {
   ultraRegionalPool: Pkm[]
   opponents: Map<string, number>
   ghost: boolean
+  rerollCount: number
+  totalMoneyEarned: number
+  totalPlayerDamageDealt: number
+  eggChance: number
+  lightX: number
+  lightY: number
 }
 
 export interface IPokemon {
@@ -420,6 +432,13 @@ export interface ISimulation {
   redPlayerId: string
 }
 
+export interface ISimulationCommand {
+  delay: number
+  executed: boolean
+  update(dt: number): void
+  execute(): void
+}
+
 export interface IDps {
   update(
     physicalDamage: number,
@@ -452,6 +471,7 @@ export function instanceofPokemonEntity(
 export interface IPokemonEntity {
   simulation: ISimulation
   refToBoardPokemon: IPokemon
+  get player(): IPlayer | undefined
   applyStat(stat: Stat, value: number): void
   addAbilityPower(
     value: number,
@@ -573,12 +593,14 @@ export interface IPokemonEntity {
   emotion: Emotion
   baseAtk: number
   isClone: boolean
+  commands: ISimulationCommand[]
 }
 
 export interface IStatus {
   magmaStorm: boolean
   burn: boolean
   silence: boolean
+  fatigue: boolean
   poisonStacks: number
   freeze: boolean
   protect: boolean
@@ -633,6 +655,7 @@ export interface IPreparationMetadata {
   type: "preparation"
   gameStartedAt: string | null
   minRank: string | null
+  maxRank: string | null
   gameMode: GameMode
   whitelist: string[]
   blacklist: string[]

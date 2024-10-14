@@ -54,7 +54,7 @@ export default function PreparationMenu() {
     BotDifficulty.MEDIUM
   )
 
-  const isReady = users.find((user) => user.id === uid)?.ready
+  const isReady = users.find((user) => user.uid === uid)?.ready
   const nbUsersReady = users.filter((user) => user.ready).length
   const allUsersReady = users.every((user) => user.ready) && nbUsersReady > 1
 
@@ -77,13 +77,13 @@ export default function PreparationMenu() {
     } else {
       setTitleNotificationIcon("🟠")
     }
-  }, [nbUsersReady, users.length])
+  }, [nbUsersReady, users.length, allUsersReady])
 
   useEffect(() => {
-    if (gameMode !== GameMode.NORMAL) {
+    if (gameMode !== GameMode.CUSTOM_LOBBY) {
       dispatch(toggleReady(true)) // automatically set users ready in non-classic game mode
     }
-  }, [gameMode])
+  }, [gameMode, dispatch])
 
   const humans = users.filter((u) => !u.isBot)
   const isElligibleForELO =
@@ -94,7 +94,11 @@ export default function PreparationMenu() {
 
   function makePrivate() {
     if (password === null) {
-      const newPassword = prompt(t("enter_password"))
+      // generate a random password made of 4 characters
+      const newPassword = Math.random()
+        .toString(36)
+        .substring(2, 6)
+        .toUpperCase()
       dispatch(changeRoomPassword(newPassword))
     } else {
       dispatch(changeRoomPassword(null))
@@ -173,13 +177,13 @@ export default function PreparationMenu() {
         <p>{t("not_elligible_elo_hint")}</p>
       ) : null}
 
-      {gameMode === GameMode.NORMAL && users.length === 1 && (
+      {gameMode === GameMode.CUSTOM_LOBBY && users.length === 1 && (
         <p>{t("add_bot_or_wait_hint")}</p>
       )}
     </>
   )
 
-  const roomPrivateButton = gameMode === GameMode.NORMAL &&
+  const roomPrivateButton = gameMode === GameMode.CUSTOM_LOBBY &&
     (isOwner || isAdmin) && (
       <button
         className="bubbly blue"
@@ -192,7 +196,7 @@ export default function PreparationMenu() {
       </button>
     )
 
-  const roomEloButton = gameMode === GameMode.NORMAL &&
+  const roomEloButton = gameMode === GameMode.CUSTOM_LOBBY &&
     (isOwner || isAdmin) && (
       <button
         className="bubbly blue"
@@ -203,8 +207,8 @@ export default function PreparationMenu() {
       </button>
     )
 
-  const roomNameInput = gameMode === GameMode.NORMAL &&
-    (isOwner || isModerator || isAdmin) &&
+  const roomNameInput = gameMode === GameMode.CUSTOM_LOBBY &&
+    (isModerator || isAdmin) &&
     user &&
     !user.anonymous && (
       <div className="my-input-group">
@@ -227,7 +231,7 @@ export default function PreparationMenu() {
       </div>
     )
 
-  const botControls = gameMode === GameMode.NORMAL && (isOwner || isAdmin) && (
+  const botControls = gameMode === GameMode.CUSTOM_LOBBY && (isOwner || isAdmin) && (
     <div className="my-input-group">
       <button
         className="bubbly blue"
@@ -257,7 +261,7 @@ export default function PreparationMenu() {
     </div>
   )
 
-  const roomInfo = gameMode === GameMode.NORMAL && (
+  const roomInfo = gameMode === GameMode.CUSTOM_LOBBY && (
     <p className="room-info">
       {t("room_leader")}: {ownerName}{" "}
       {password && (
@@ -269,7 +273,7 @@ export default function PreparationMenu() {
     </p>
   )
 
-  const readyButton = (gameMode === GameMode.NORMAL || !isReady) && users.length > 0 && (
+  const readyButton = (gameMode === GameMode.CUSTOM_LOBBY || !isReady) && users.length > 0 && (
     <button
       className={cc("bubbly", "ready-button", isReady ? "green" : "orange")}
       onClick={() => {
@@ -306,7 +310,7 @@ export default function PreparationMenu() {
         {users.map((u) => {
           return (
             <PreparationMenuUser
-              key={u.id}
+              key={u.uid}
               user={u}
               isOwner={isOwner}
               ownerId={ownerId}
@@ -316,13 +320,13 @@ export default function PreparationMenu() {
       </div>
 
       <div className="actions">
-        {botControls}
+        {roomNameInput}
         <div className="spacer"></div>
         {deleteRoomButton}
       </div>
 
       <div className="actions">
-        {roomNameInput}
+        {botControls}
         <div className="spacer"></div>
         {roomPrivateButton}
         {roomEloButton}
@@ -335,7 +339,7 @@ export default function PreparationMenu() {
         {startGameButton}
       </div>
 
-      {isOwner && showBotSelectModal && <BotSelectModal botsSelected={users.filter((u) => u.isBot).map(u => u.id)} close={() => setShowBotSelectModal(false)} />}
+      {isOwner && showBotSelectModal && <BotSelectModal botsSelected={users.filter((u) => u.isBot).map(u => u.uid)} close={() => setShowBotSelectModal(false)} />}
     </div>
   )
 }

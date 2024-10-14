@@ -1,7 +1,6 @@
 import { PayloadAction, createSlice } from "@reduxjs/toolkit"
 import { GameUser, IGameUser } from "../../../models/colyseus-models/game-user"
 import Message from "../../../models/colyseus-models/message"
-import { IBot } from "../../../models/mongo-models/bot-v2"
 import { IChatV2 } from "../../../types"
 import { GameMode } from "../../../types/enum/Game"
 
@@ -30,7 +29,7 @@ const initialState: IUserPreparationState = {
   user: undefined,
   password: null,
   noElo: false,
-  gameMode: GameMode.NORMAL,
+  gameMode: GameMode.CUSTOM_LOBBY,
   whitelist: [],
   blacklist: []
 }
@@ -40,7 +39,7 @@ export const preparationSlice = createSlice({
   initialState: initialState,
   reducers: {
     setUser: (state, action: PayloadAction<GameUser>) => {
-      const u: GameUser = JSON.parse(JSON.stringify(action.payload))
+      const u: GameUser = structuredClone(action.payload)
       state.user = u
     },
     pushMessage: (state, action: PayloadAction<Message>) => {
@@ -52,20 +51,20 @@ export const preparationSlice = createSlice({
       )
     },
     addUser: (state, action: PayloadAction<IGameUser>) => {
-      const u: IGameUser = JSON.parse(JSON.stringify(action.payload))
+      const u: IGameUser = structuredClone(action.payload)
       state.users.push(u)
     },
     changeUser: (
       state,
       action: PayloadAction<{ id: string; field: string; value: any }>
     ) => {
-      state.users[state.users.findIndex((u) => u.id == action.payload.id)][
+      state.users[state.users.findIndex((u) => u.uid == action.payload.id)][
         action.payload.field
       ] = action.payload.value
     },
     removeUser: (state, action: PayloadAction<string>) => {
       state.users.splice(
-        state.users.findIndex((u) => u.id == action.payload),
+        state.users.findIndex((u) => u.uid == action.payload),
         1
       )
     },
@@ -90,7 +89,7 @@ export const preparationSlice = createSlice({
     setGameMode: (state, action: PayloadAction<GameMode>) => {
       state.gameMode = action.payload
     },
-    leavePreparation: () => initialState,
+    resetPreparation: () => initialState,
     setWhiteList: (state, action: PayloadAction<string[]>) => {
       state.whitelist = action.payload
     },
@@ -116,7 +115,7 @@ export const {
   setWhiteList,
   setBlackList,
   setGameMode,
-  leavePreparation
+  resetPreparation
 } = preparationSlice.actions
 
 export default preparationSlice.reducer

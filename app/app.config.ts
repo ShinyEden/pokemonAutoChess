@@ -1,6 +1,5 @@
 import path from "path"
 import { monitor } from "@colyseus/monitor"
-import { ArraySchema } from "@colyseus/schema"
 import config from "@colyseus/tools"
 import { RedisDriver, RedisPresence, ServerOptions, matchMaker } from "colyseus"
 import cors from "cors"
@@ -8,6 +7,7 @@ import express, { ErrorRequestHandler } from "express"
 import basicAuth from "express-basic-auth"
 import admin from "firebase-admin"
 import { connect } from "mongoose"
+import pkg from "../package.json"
 import { initTilemap } from "./core/design"
 import { GameRecord } from "./models/colyseus-models/game-record"
 import DetailledStatistic from "./models/mongo-models/detailled-statistic-v2"
@@ -20,15 +20,19 @@ import AfterGameRoom from "./rooms/after-game-room"
 import CustomLobbyRoom from "./rooms/custom-lobby-room"
 import GameRoom from "./rooms/game-room"
 import PreparationRoom from "./rooms/preparation-room"
+import { getBotData, getBotsList } from "./services/bots"
+import { discordService } from "./services/discord"
+import { getLeaderboard } from "./services/leaderboard"
+import { pastebinService } from "./services/pastebin"
 import { Title } from "./types"
-import { SynergyTriggers } from "./types/Config"
+import {
+  MAX_CONCURRENT_PLAYERS_ON_SERVER,
+  MAX_POOL_CONNECTIONS_SIZE,
+  SynergyTriggers
+} from "./types/Config"
 import { DungeonPMDO } from "./types/enum/Dungeon"
 import { Item } from "./types/enum/Item"
 import { Pkm, PkmIndex } from "./types/enum/Pokemon"
-import { getLeaderboard } from "./services/leaderboard"
-import { getBotData, getBotsList } from "./services/bots"
-import { discordService } from "./services/discord"
-import { pastebinService } from "./services/pastebin"
 import { logger } from "./utils/logger"
 
 const clientSrc = __dirname.includes("server")
@@ -44,11 +48,11 @@ let gameOptions: ServerOptions = {}
 
 if (process.env.NODE_APP_INSTANCE) {
   const processNumber = Number(process.env.NODE_APP_INSTANCE || "0")
-  const port = 2567 + processNumber
+  const port = (Number(process.env.PORT) || 2567) + processNumber
   gameOptions = {
     presence: new RedisPresence(process.env.REDIS_URI),
     driver: new RedisDriver(process.env.REDIS_URI),
-    publicAddress: `${process.env.SERVER_NAME}/${port}`,
+    publicAddress: `${port}.${process.env.SERVER_NAME}`,
     selectProcessIdToCreateRoom: async function (
       roomName: string,
       clientOptions: any
@@ -136,10 +140,6 @@ export default config({
       res.send(Pkm)
     })
 
-    app.get("/title-names", (req, res) => {
-      res.send(Title)
-    })
-
     app.get("/pokemons-index", (req, res) => {
       res.send(PkmIndex)
     })
@@ -201,21 +201,19 @@ export default config({
 
       const stats = await DetailledStatistic.find(
         { playerId: playerUid },
-        ['pokemons', 'time', 'rank', 'elo'],
+        ["pokemons", "time", "rank", "elo"],
         { limit: limit, skip: skip, sort: { time: -1 } }
       )
       if (stats) {
-        const records = new ArraySchema<GameRecord>()
-        stats.forEach((record) => {
-          records.push(
+        const records = stats.map(
+          (record) =>
             new GameRecord(
               record.time,
               record.rank,
               record.elo,
               record.pokemons
             )
-          )
-        })
+        )
 
         // Return the records as the response
         return res.status(200).json(records)
@@ -254,6 +252,12 @@ export default config({
       res.send(getBotData(req.params.id))
     })
 
+    app.get("/status", async (req, res) => {
+      const ccu = await matchMaker.stats.getGlobalCCU()
+      const version = pkg.version
+      res.send({ ccu, maxCcu: MAX_CONCURRENT_PLAYERS_ON_SERVER, version })
+    })
+
     const basicAuthMiddleware = basicAuth({
       // list of users and passwords
       users: {
@@ -278,7 +282,10 @@ export default config({
     /**
      * Before before gameServer.listen() is called.
      */
-    connect(process.env.MONGO_URI!)
+    connect(process.env.MONGO_URI!, {
+      maxPoolSize: MAX_POOL_CONNECTIONS_SIZE,
+      socketTimeoutMS: 45000
+    })
     admin.initializeApp({
       credential: admin.credential.cert({
         projectId: process.env.FIREBASE_PROJECT_ID!,

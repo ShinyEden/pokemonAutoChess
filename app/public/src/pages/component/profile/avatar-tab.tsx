@@ -9,9 +9,13 @@ import { PokemonTypeahead } from "../typeahead/pokemon-typeahead"
 export function AvatarTab() {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
-  const pokemonCollection = useAppSelector(
-    (state) => state.lobby.pokemonCollection
+  const pokemonCollectionMap = useAppSelector(
+    (state) => state.network.profile?.pokemonCollection
   )
+
+  const pokemonCollection = pokemonCollectionMap
+    ? [...pokemonCollectionMap.values()]
+    : []
   const [selectedPkm, setSelectedPkm] = useState<Pkm | "">("")
 
   return (

@@ -7,6 +7,7 @@ import { GADGETS } from "../../../../../core/gadgets"
 import { Role } from "../../../../../types"
 import { useAppDispatch, useAppSelector } from "../../../hooks"
 import { setSearchedUser } from "../../../stores/LobbyStore"
+import { toggleFullScreen } from "../../utils/fullscreen"
 import { cc } from "../../utils/jsx"
 import Booster from "../booster/booster"
 import TeamBuilderModal from "../bot-builder/team-builder-modal"
@@ -20,6 +21,7 @@ import { usePatchVersion } from "../patchnotes/usePatchVersion"
 import Profile from "../profile/profile"
 import { TournamentsAdmin } from "../tournaments-admin/tournaments-admin"
 import Wiki from "../wiki/wiki"
+import ServersList from "../servers/servers-list"
 
 import "./main-sidebar.css"
 
@@ -43,7 +45,6 @@ export function MainSidebar(props: MainSidebarProps) {
   const sidebarRef = useRef<HTMLHtmlElement>(null)
 
   const { t } = useTranslation()
-  const user = useAppSelector((state) => state.lobby.user)
   const profile = useAppSelector((state) => state.network.profile)
   const profileLevel = profile?.level ?? 0
 
@@ -72,7 +73,7 @@ export function MainSidebar(props: MainSidebarProps) {
         ref.removeEventListener("mouseleave", collapseSidebar)
       }
     }
-  }, [collapsed])
+  }, [])
 
   return (
     <Sidebar collapsed={collapsed} className="sidebar" ref={sidebarRef}>
@@ -165,15 +166,13 @@ export function MainSidebar(props: MainSidebarProps) {
           </NavLink>
         )}
 
-        {page !== "game" &&
-          user?.anonymous === false &&
-          profileLevel >= GADGETS.BOT_BUILDER.levelRequired && (
-            <NavLink svg="bot" onClick={() => navigate("/bot-builder")}>
-              {t("bot_builder")}
-            </NavLink>
-          )}
+        {page !== "game" && profileLevel >= GADGETS.BOT_BUILDER.levelRequired && (
+          <NavLink svg="bot" onClick={() => navigate("/bot-builder")}>
+            {t("bot_builder")}
+          </NavLink>
+        )}
 
-        {page !== "game" && user?.role === Role.ADMIN && (
+        {page !== "game" && profile?.role === Role.ADMIN && (
           <>
             <NavLink
               svg="pokemon-sprite"
@@ -208,7 +207,24 @@ export function MainSidebar(props: MainSidebarProps) {
           {t("options")}
         </NavLink>
 
+        {page === "game" && document.fullscreenEnabled && <NavLink
+          svg="fullscreen"
+          onClick={toggleFullScreen}
+        >
+          {t("toggle_fullscreen")}
+        </NavLink>}
+
         <div className="spacer"></div>
+
+        {page !== "game" && (
+          <NavLink
+            svg="players"
+            className="community-servers"
+            location="servers" handleClick={changeModal}
+          >
+            {t("community_servers")}
+          </NavLink>
+        )}
 
         {page !== "game" && (
           <NavLink
@@ -300,6 +316,7 @@ export type Modals =
   | "jukebox"
   | "announcement"
   | "tournaments"
+  | "servers"
 
 function Modals({
   modal,
@@ -368,6 +385,13 @@ function Modals({
       </Modal>
       <Modal show={modal === "meta"} header={t("meta")} onClose={closeModal}>
         <MetaReport />
+      </Modal>
+      <Modal
+        onClose={closeModal}
+        show={modal === "servers"}
+        className="servers-modal"
+        header={t("community_servers")}>
+        <ServersList />
       </Modal>
       <TeamBuilderModal
         show={modal === "team-builder"}

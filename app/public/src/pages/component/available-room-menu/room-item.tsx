@@ -7,16 +7,17 @@ import {
   MAX_PLAYERS_PER_GAME
 } from "../../../../../types/Config"
 import { GameMode } from "../../../../../types/enum/Game"
+import { getRank } from "../../../../../utils/elo"
 import { useAppSelector } from "../../../hooks"
 import { cc } from "../../utils/jsx"
 import "./room-item.css"
 
 export default function RoomItem(props: {
   room: RoomAvailable<IPreparationMetadata>
-  click: (room: RoomAvailable<IPreparationMetadata>) => Promise<void>
+  click: (room: RoomAvailable<IPreparationMetadata>) => Promise<any>
 }) {
   const { t } = useTranslation()
-  const user = useAppSelector((state) => state.lobby.user)
+  const user = useAppSelector((state) => state.network.profile)
 
   const nbPlayersExpected =
     props.room.metadata?.whitelist && props.room.metadata.whitelist.length > 0
@@ -34,16 +35,16 @@ export default function RoomItem(props: {
   } else if (
     props.room.metadata?.blacklist &&
     props.room.metadata.blacklist.length > 0 &&
-    user?.id &&
-    props.room.metadata.blacklist.includes(user.id) === true
+    user?.uid &&
+    props.room.metadata.blacklist.includes(user.uid) === true
   ) {
     canJoin = false
     disabledReason = t("blacklisted")
   } else if (
     props.room.metadata?.whitelist &&
     props.room.metadata.whitelist.length > 0 &&
-    user?.id &&
-    props.room.metadata.whitelist.includes(user.id) === false
+    user?.uid &&
+    props.room.metadata.whitelist.includes(user.uid) === false
   ) {
     canJoin = false
     disabledReason = t("not_whitelisted")
@@ -53,6 +54,12 @@ export default function RoomItem(props: {
   ) {
     canJoin = false
     disabledReason = t("min_rank_not_reached")
+  } else if (
+    props.room.metadata?.maxRank != null &&
+    (user?.elo && EloRankThreshold[getRank(user.elo)] > EloRankThreshold[props.room.metadata?.maxRank])
+  ) {
+    canJoin = false
+    disabledReason = t("max_rank_not_reached")
   }
 
   const title = `${props.room.metadata?.ownerName ? "Owner: " + props.room.metadata?.ownerName : ""}\n${props.room.metadata?.playersInfo?.join("\n")}`
@@ -79,7 +86,7 @@ export default function RoomItem(props: {
         />
       )}
       {props.room.metadata?.noElo &&
-        props.room.metadata?.gameMode === GameMode.NORMAL && (
+        props.room.metadata?.gameMode === GameMode.CUSTOM_LOBBY && (
           <img
             alt={t("no_elo")}
             title={t("no_elo")}

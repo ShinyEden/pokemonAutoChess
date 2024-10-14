@@ -12,10 +12,9 @@ import { canSell } from "../../core/pokemon-entity"
 import Simulation from "../../core/simulation"
 import { getLevelUpCost } from "../../models/colyseus-models/experience-manager"
 import Player from "../../models/colyseus-models/player"
-import { isOnBench } from "../../models/colyseus-models/pokemon"
+import { isOnBench, PokemonClasses } from "../../models/colyseus-models/pokemon"
 import { createRandomEgg } from "../../models/egg-factory"
 import PokemonFactory from "../../models/pokemon-factory"
-import { getPokemonData } from "../../models/precomputed/precomputed-pokemon-data"
 import { PVEStages } from "../../models/pve-stages"
 import { getBuyPrice, getSellPrice } from "../../models/shop"
 import { getAvatarString } from "../../public/src/utils"
@@ -40,7 +39,7 @@ import {
   SynergyTriggers
 } from "../../types/Config"
 import { Effect } from "../../types/enum/Effect"
-import { BattleResult, GamePhaseState, Rarity } from "../../types/enum/Game"
+import { BattleResult, GamePhaseState, Team } from "../../types/enum/Game"
 import {
   ArtificialItems,
   Berries,
@@ -48,13 +47,18 @@ import {
   Item,
   ItemComponents,
   ItemRecipe,
+  NonHoldableItems,
   ShinyItems,
   SynergyGivenByItem,
-  SynergyItems,
-  WeatherRocks
+  SynergyItems
 } from "../../types/enum/Item"
 import { Passive } from "../../types/enum/Passive"
-import { Pkm, PkmFamily, PkmIndex, Unowns } from "../../types/enum/Pokemon"
+import {
+  Pkm,
+  PkmIndex,
+  PkmRegionalVariants,
+  Unowns
+} from "../../types/enum/Pokemon"
 import { SpecialGameRule } from "../../types/enum/SpecialGameRule"
 import { Synergy } from "../../types/enum/Synergy"
 import { removeInArray } from "../../utils/array"
@@ -67,7 +71,7 @@ import {
 } from "../../utils/board"
 import { repeat } from "../../utils/function"
 import { logger } from "../../utils/logger"
-import { max } from "../../utils/number"
+import { max, min } from "../../utils/number"
 import { chance, pickNRandomIn, pickRandomIn } from "../../utils/random"
 import { resetArraySchema, values } from "../../utils/schemas"
 import { getWeather } from "../../utils/weather"
@@ -122,11 +126,11 @@ export class OnShopCommand extends Command<
 
     if (
       pokemon.passive === Passive.UNOWN &&
-      player.effects.has(Effect.EERIE_SPELL) &&
       player.shop.every((p) => Unowns.includes(p))
     ) {
       // reset shop after picking in a unown shop
       this.state.shop.assignShop(player, true, this.state)
+      player.shopFreeRolls -= 1
     } else {
       player.shop = player.shop.with(index, Pkm.DEFAULT)
     }
@@ -157,6 +161,7 @@ export class OnRemoveFromShopCommand extends Command<
     const cost = getBuyPrice(name, this.state.specialGameRule)
     if (player.money >= cost) {
       player.shop = player.shop.with(index, Pkm.DEFAULT)
+      player.shopLocked = true
       this.state.shop.releasePokemon(name, player)
     }
   }
@@ -220,8 +225,7 @@ export class OnDragDropCommand extends Command<
       message.updateItems = false
       const pokemon = player.board.get(detail.id)
       if (pokemon) {
-        const x = parseInt(detail.x)
-        const y = parseInt(detail.y)
+        const { x, y } = detail
         const dropOnBench = y == 0
         const dropFromBench = isOnBench(pokemon)
 
@@ -300,6 +304,53 @@ export class OnDragDropCommand extends Command<
     if (commands.length > 0) {
       return commands
     }
+  }
+}
+
+export class OnSwitchBenchAndBoardCommand extends Command<
+  GameRoom,
+  {
+    client: Client
+    pokemonId: string
+  }
+> {
+  execute({ client, pokemonId }) {
+    const playerId = client.auth.uid
+    const player = this.room.state.players.get(playerId)
+    if (!player) return
+
+    const pokemon = player.board.get(pokemonId)
+    if (!pokemon) return
+
+    if (this.state.phase !== GamePhaseState.PICK) return // can't switch pokemons if not in pick phase
+
+    if (pokemon.positionY === 0) {
+      // pokemon is on bench, switch to board
+      const teamSize = this.room.getTeamSize(player.board)
+      const isBoardFull =
+        teamSize >=
+        getMaxTeamSize(
+          player.experienceManager.level,
+          this.room.state.specialGameRule
+        )
+      const destination = getFirstAvailablePositionOnBoard(player.board)
+      if (pokemon.canBePlaced && destination && !isBoardFull) {
+        const [dx, dy] = destination
+
+        this.room.swap(player, pokemon, dx, dy)
+        pokemon.onChangePosition(dx, dy, player)
+      }
+    } else {
+      // pokemon is on board, switch to bench
+      const dx = getFirstAvailablePositionInBench(player.board)
+      if (dx !== undefined) {
+        this.room.swap(player, pokemon, dx, 0)
+        pokemon.onChangePosition(dx, 0, player)
+      }
+    }
+
+    player.updateSynergies()
+    player.boardSize = this.room.getTeamSize(player.board)
   }
 }
 
@@ -399,7 +450,7 @@ export class OnDragDropItemCommand extends Command<
       return
     }
 
-    const pokemon = player.getPokemonAt(x, y)
+    let pokemon = player.getPokemonAt(x, y)
     if (pokemon === undefined) {
       client.send(Transfer.DRAG_DROP_FAILED, message)
       return
@@ -422,38 +473,52 @@ export class OnDragDropItemCommand extends Command<
     }
 
     if (
-      item === Item.OLD_ROD ||
-      item === Item.GOOD_ROD ||
-      item === Item.SUPER_ROD
+      item === Item.TEAL_MASK ||
+      item === Item.WELLSPRING_MASK ||
+      item === Item.HEARTHFLAME_MASK ||
+      item === Item.CORNERSTONE_MASK
     ) {
-      client.send(Transfer.DRAG_DROP_FAILED, message)
-      return
-    }
-
-    if (item === Item.GOLDEN_ROD) {
-      let needsRecomputingSynergiesAgain = false
-      pokemon?.items.forEach((item) => {
-        pokemon.items.delete(item)
-        player.items.push(item)
-        if (item in SynergyGivenByItem) {
-          const type = SynergyGivenByItem[item]
-          const nativeTypes = getPokemonData(pokemon.name).types
-          if (nativeTypes.includes(type) === false) {
-            pokemon.types.delete(type)
-            if (!isOnBench(pokemon)) {
-              needsRecomputingSynergiesAgain = true
-            }
-          }
+      if (
+        pokemon.passive === Passive.OGERPON_TEAL ||
+        pokemon.passive === Passive.OGERPON_WELLSPRING ||
+        pokemon.passive === Passive.OGERPON_HEARTHFLAME ||
+        pokemon.passive === Passive.OGERPON_CORNERSTONE
+      ) {
+        if (pokemon.passive === Passive.OGERPON_TEAL) {
+          pokemon.items.delete(Item.TEAL_MASK)
+        } else if (pokemon.passive === Passive.OGERPON_WELLSPRING) {
+          pokemon.items.delete(Item.WELLSPRING_MASK)
+        } else if (pokemon.passive === Passive.OGERPON_HEARTHFLAME) {
+          pokemon.items.delete(Item.HEARTHFLAME_MASK)
+        } else if (pokemon.passive === Passive.OGERPON_CORNERSTONE) {
+          pokemon.items.delete(Item.CORNERSTONE_MASK)
         }
-      })
-      if (needsRecomputingSynergiesAgain) {
-        player.updateSynergies()
+
+        if (item === Item.TEAL_MASK) {
+          pokemon.items.add(Item.TEAL_MASK)
+          player.transformPokemon(pokemon, Pkm.OGERPON_TEAL_MASK)
+        } else if (item === Item.WELLSPRING_MASK) {
+          pokemon.items.add(Item.WELLSPRING_MASK)
+          player.transformPokemon(pokemon, Pkm.OGERPON_WELLSPRING_MASK)
+        } else if (item === Item.HEARTHFLAME_MASK) {
+          pokemon.items.add(Item.HEARTHFLAME_MASK)
+          player.transformPokemon(pokemon, Pkm.OGERPON_HEARTHFLAME_MASK)
+        } else if (item === Item.CORNERSTONE_MASK) {
+          pokemon.items.add(Item.CORNERSTONE_MASK)
+          player.transformPokemon(pokemon, Pkm.OGERPON_CORNERSTONE_MASK)
+        }
+      } else {
+        client.send(Transfer.DRAG_DROP_FAILED, message)
+        return
       }
-      client.send(Transfer.DRAG_DROP_FAILED, message)
-      return
     }
 
-    if (!pokemon.canHoldItems) {
+    if (item === Item.FIRE_SHARD) {
+      if (pokemon.types.has(Synergy.FIRE) && player.life > 2) {
+        pokemon.atk += 2
+        player.life = min(1)(player.life - 2)
+        removeInArray(player.items, item)
+      }
       client.send(Transfer.DRAG_DROP_FAILED, message)
       return
     }
@@ -463,13 +528,13 @@ export class OnDragDropItemCommand extends Command<
       return
     }
 
-    if (
-      item === Item.RARE_CANDY &&
-      (pokemon.evolution === Pkm.DEFAULT ||
-        pokemon.rarity === Rarity.UNIQUE ||
-        pokemon.rarity === Rarity.LEGENDARY ||
-        pokemon.rarity === Rarity.HATCH)
-    ) {
+    if (item === Item.BLACK_AUGURITE && pokemon.passive === Passive.SCYTHER) {
+      pokemon.items.add(item) // add the item just in time for the evolution
+      pokemon.evolutionRule.tryEvolve(pokemon, player, this.state.stageLevel)
+      pokemon.items.delete(item) // retrieve the item, black augurite is not a held item
+    }
+
+    if (NonHoldableItems.includes(item) || !pokemon.canHoldItems) {
       client.send(Transfer.DRAG_DROP_FAILED, message)
       return
     }
@@ -498,22 +563,23 @@ export class OnDragDropItemCommand extends Command<
       return
     }
 
-    if (
-      WeatherRocks.includes(item) &&
-      (!pokemon.types.has(Synergy.ROCK) ||
-        pokemon.types.has(SynergyGivenByItem[item]))
-    ) {
-      if (item !== Item.BLACK_AUGURITE || pokemon.passive !== Passive.SCYTHER) {
-        // prevent adding weather rocks to non-rock pokemon, or to those with the synergy already
-        client.send(Transfer.DRAG_DROP_FAILED, message)
-        return
-      }
-    }
-
     if (!isBasicItem && pokemon.items.has(item)) {
       // prevent adding twitce the same completed item
       client.send(Transfer.DRAG_DROP_FAILED, message)
       return
+    }
+
+    if (item === Item.RARE_CANDY) {
+      const evolution = pokemon?.evolution
+      if (
+        !evolution ||
+        evolution === Pkm.DEFAULT ||
+        pokemon.items.has(Item.EVIOLITE)
+      ) {
+        client.send(Transfer.DRAG_DROP_FAILED, message)
+        return
+      }
+      pokemon = player.transformPokemon(pokemon, evolution)
     }
 
     if (isBasicItem && existingBasicItemToCombine) {
@@ -553,6 +619,10 @@ export class OnDragDropItemCommand extends Command<
       removeInArray(player.items, item)
     }
 
+    if (pokemon.items.has(Item.SHINY_CHARM)) {
+      pokemon.shiny = true
+    }
+
     this.room.checkEvolutionsAfterItemAcquired(playerId, pokemon)
 
     player.updateSynergies()
@@ -588,11 +658,8 @@ export class OnSellDropCommand extends Command<
 
       if (pokemon) {
         this.state.shop.releasePokemon(pokemon.name, player)
-        player.money += getSellPrice(
-          pokemon.name,
-          pokemon.shiny,
-          this.state.specialGameRule
-        )
+        const sellPrice = getSellPrice(pokemon, this.state.specialGameRule)
+        player.addMoney(sellPrice, false, null)
         pokemon.items.forEach((it) => {
           player.items.push(it)
         })
@@ -609,10 +676,13 @@ export class OnSellDropCommand extends Command<
 export class OnRefreshCommand extends Command<GameRoom, string> {
   execute(id) {
     const player = this.state.players.get(id)
-    if (player && player.money >= 1 && player.alive) {
+    if (!player) return
+    const rollCost = player.shopFreeRolls > 0 ? 0 : 1
+    if (player.money >= rollCost && player.alive) {
       this.state.shop.assignShop(player, true, this.state)
-      player.money -= 1
+      player.money -= rollCost
       player.rerollCount++
+      if (player.shopFreeRolls > 0) player.shopFreeRolls--
     }
   }
 }
@@ -676,21 +746,12 @@ export class OnPickBerryCommand extends Command<
   }
 }
 
-export class OnJoinCommand extends Command<
-  GameRoom,
-  {
-    client: Client
-    options: { spectate?: boolean }
-    auth
-  }
-> {
-  async execute({ client, options, auth }) {
+export class OnJoinCommand extends Command<GameRoom, { client: Client }> {
+  async execute({ client }) {
     try {
       //logger.debug("onJoin", client.auth.uid)
       const players = values(this.state.players)
-      if (options.spectate === true) {
-        this.state.spectators.add(client.auth.uid)
-      } else if (players.some((p) => p.id === auth.uid)) {
+      if (players.some((p) => p.id === client.auth.uid)) {
         /*logger.info(
           `${client.auth.displayName} (${client.id}) joined game room ${this.room.roomId}`
         )*/
@@ -701,10 +762,7 @@ export class OnJoinCommand extends Command<
           }
         }
       } else {
-        logger.warn(`player not in this game players list tried to join game`, {
-          userId: client.auth.uid,
-          roomId: this.room.roomId
-        })
+        this.state.spectators.add(client.auth.uid)
       }
     } catch (error) {
       logger.error(error)
@@ -975,7 +1033,7 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
         income += player.interest
         income += max(5)(player.streak)
         income += 5
-        player.money += income
+        player.addMoney(income, true, null)
         if (income > 0) {
           const client = this.room.clients.find(
             (cli) => cli.auth.uid === player.id
@@ -1042,7 +1100,16 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
           for (let i = 0; i < 3; i++) {
             const p = pool.pop()
             if (p) {
-              player.pokemonsProposition.push(p)
+              // If the Pokemon has a regional variant in the player's region, show that instead of the base form.
+              // Base form will still be added to the pool for all players
+              const regionalVariants = (PkmRegionalVariants[p] ?? []).filter(
+                (pkm) => new PokemonClasses[pkm]().isInRegion(player.map)
+              )
+              if (regionalVariants.length > 0) {
+                player.pokemonsProposition.push(pickRandomIn(regionalVariants))
+              } else {
+                player.pokemonsProposition.push(p)
+              }
               player.itemsProposition.push(items[i])
             }
           }
@@ -1057,12 +1124,27 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
           this.state.shop.addAdditionalPokemon(p)
         }
       })
+
+      // update regional pokemons in case some regional variants of add picks are now available
+      this.state.players.forEach((p) => p.updateRegionalPool(this.state, false))
     }
 
     const isAfterPVE = this.state.stageLevel - 1 in PVEStages
     const commands = new Array<Command>()
 
     this.state.players.forEach((player: Player) => {
+      const fireLevel = player.synergies.get(Synergy.FIRE) ?? 0
+      const fireSynergLevel = SynergyTriggers[Synergy.FIRE].filter(
+        (n) => n <= fireLevel
+      ).length
+      if (
+        fireSynergLevel === 4 &&
+        player.items.includes(Item.FIRE_SHARD) === false &&
+        player.life > 2
+      ) {
+        player.items.push(Item.FIRE_SHARD)
+      }
+
       const bestRod = FishingRods.find((rod) => player.items.includes(rod))
 
       if (bestRod && getFreeSpaceOnBench(player.board) > 0 && !isAfterPVE) {
@@ -1077,15 +1159,6 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
       for (let i = 0; i < nbTrees; i++) {
         player.berryTreesStage[i] = max(3)(player.berryTreesStage[i] + 1)
       }
-
-      player.board.forEach((pokemon) => {
-        if (
-          pokemon.items.has(Item.RARE_CANDY) &&
-          pokemon.evolution !== Pkm.DEFAULT
-        ) {
-          this.room.spawnOnBench(player, PkmFamily[pokemon.name])
-        }
-      })
     })
 
     this.spawnWanderingPokemons()
@@ -1178,26 +1251,32 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
           }
         }
 
-        let eggChance = 0,
-          shinyChance = 0,
-          nbMaxEggs = 0
-        if (
-          player.history.at(-1)?.result === BattleResult.DEFEAT &&
-          (player.effects.has(Effect.BREEDER) ||
-            player.effects.has(Effect.GOLDEN_EGGS))
-        ) {
-          eggChance = 1
-          nbMaxEggs = 8
-          shinyChance = player.effects.has(Effect.GOLDEN_EGGS)
-            ? 0.25 * (player.streak + 1)
-            : 0
-        }
-        if (
-          player.history.at(-1)?.result === BattleResult.DEFEAT &&
-          player.effects.has(Effect.HATCHER)
-        ) {
-          eggChance = 0.25 * (player.streak + 1)
-          nbMaxEggs = 1
+        let eggChance = 0
+        let shinyChance = 0
+        const hasBabyActive =
+          player.effects.has(Effect.HATCHER) ||
+          player.effects.has(Effect.BREEDER) ||
+          player.effects.has(Effect.GOLDEN_EGGS)
+        const hasLostLastBattle =
+          player.history.at(-1)?.result === BattleResult.DEFEAT
+
+        if (hasLostLastBattle && hasBabyActive) {
+          if (player.effects.has(Effect.HATCHER)) {
+            eggChance = player.eggChance
+            shinyChance = 0
+          }
+          if (player.effects.has(Effect.BREEDER)) {
+            eggChance = 1
+            shinyChance = 0
+          }
+          if (player.effects.has(Effect.GOLDEN_EGGS)) {
+            eggChance = 1
+            shinyChance = player.eggChance
+          }
+
+          player.eggChance = max(1)(player.eggChance + 0.25)
+        } else if (!isPVE) {
+          player.eggChance = 0
         }
 
         if (
@@ -1205,34 +1284,25 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
           [1, 2, 3].includes(this.state.stageLevel)
         ) {
           eggChance = 1
-          nbMaxEggs = 8
         }
 
         const eggsOnBench = values(player.board).filter(
           (p) => p.name === Pkm.EGG
         )
-        const nbOfEggs = eggsOnBench.length
         const nbOfShinyEggs = eggsOnBench.filter((p) => p.shiny).length
 
-        if (
-          chance(eggChance) &&
-          getFreeSpaceOnBench(player.board) > 0 &&
-          nbOfEggs < nbMaxEggs
-        ) {
+        if (chance(eggChance) && getFreeSpaceOnBench(player.board) > 0) {
           const shiny = chance(shinyChance) && nbOfShinyEggs === 0
           const egg = createRandomEgg(shiny, player)
           const x = getFirstAvailablePositionInBench(player.board)
           egg.positionX = x !== undefined ? x : -1
           egg.positionY = 0
           player.board.set(egg.id, egg)
-        }
-
-        if (!player.isBot) {
-          if (!player.shopLocked) {
-            this.state.shop.assignShop(player, false, this.state)
-          } else {
-            this.state.shop.refillShop(player, this.state)
-            player.shopLocked = false
+          if (
+            player.effects.has(Effect.HATCHER) ||
+            (player.effects.has(Effect.GOLDEN_EGGS) && shiny)
+          ) {
+            player.eggChance = 0
           }
         }
 
@@ -1257,14 +1327,26 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
             // remove after one fight
             player.board.delete(key)
             player.board.delete(pokemon.id)
-            player.updateSynergies()
-            if (!player.shopLocked) {
-              this.state.shop.assignShop(player, false, this.state) // refresh unown shop in case player lost psychic 6
-            }
           }
         })
-        // Refreshes effects (like tapu Terrains)
+
+        // Refreshes effects (Tapu Terrains, or if player lost Psychic 6 after Unown diseappeared)
         player.updateSynergies()
+
+        // Refreshes shop
+        if (!player.isBot) {
+          if (!player.shopLocked) {
+            if (player.shop.every((p) => Unowns.includes(p))) {
+              // player stayed on unown shop and did nothing, so we remove its free roll
+              player.shopFreeRolls -= 1
+            }
+
+            this.state.shop.assignShop(player, false, this.state)
+          } else {
+            this.state.shop.refillShop(player, this.state)
+            player.shopLocked = false
+          }
+        }
       }
     })
 
@@ -1312,13 +1394,14 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
             pveStage.emotion
           )
           player.opponentTitle = "WILD"
+          player.team = Team.BLUE_TEAM
 
           const rewards = pveStage.getRewards?.(player) ?? ([] as Item[])
           resetArraySchema(player.pveRewards, rewards)
 
           const rewardsPropositions = this.state.shinyEncounter
             ? pickNRandomIn(ShinyItems, 3)
-            : pveStage.getRewardsPropositions?.(player) ?? ([] as Item[])
+            : (pveStage.getRewardsPropositions?.(player) ?? ([] as Item[]))
 
           resetArraySchema(player.pveRewardsPropositions, rewardsPropositions)
 
@@ -1326,7 +1409,7 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
             pveStage,
             this.state.shinyEncounter
           )
-          const weather = getWeather(player.board, pveBoard)
+          const weather = getWeather(player, null, pveBoard)
           const simulation = new Simulation(
             nanoid(),
             this.room,
@@ -1338,7 +1421,6 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
             weather
           )
           player.simulationId = simulation.id
-          player.simulationTeamIndex = 0
           this.state.simulations.set(simulation.id, simulation)
         }
       })
@@ -1346,42 +1428,44 @@ export class OnUpdatePhaseCommand extends Command<GameRoom> {
       const matchups = selectMatchups(this.state)
 
       matchups.forEach((matchup) => {
-        const playerA = matchup.a,
-          playerB = matchup.b
-        const weather = getWeather(playerA.board, playerB.board)
+        const { bluePlayer, redPlayer } = matchup
+        const weather = getWeather(bluePlayer, redPlayer, redPlayer.board)
         const simulationId = nanoid()
         const simulation = new Simulation(
           simulationId,
           this.room,
-          playerA.board,
-          playerB.board,
-          playerA as Player,
-          playerB as Player,
+          bluePlayer.board,
+          redPlayer.board,
+          bluePlayer,
+          redPlayer,
           this.state.stageLevel,
-          weather
+          weather,
+          matchup.ghost
         )
-        playerA.simulationId = simulationId
-        playerA.simulationTeamIndex = 0
-        playerA.opponents.set(
-          playerB.id,
-          (playerA.opponents.get(playerB.id) ?? 0) + 1
+        bluePlayer.simulationId = simulationId
+        bluePlayer.team = Team.BLUE_TEAM
+        bluePlayer.opponents.set(
+          redPlayer.id,
+          (bluePlayer.opponents.get(redPlayer.id) ?? 0) + 1
         )
-        playerA.opponentId = playerB.id
-        playerA.opponentName = playerB.name
-        playerA.opponentAvatar = playerB.avatar
-        playerA.opponentTitle = playerB.title ?? ""
+        bluePlayer.opponentId = redPlayer.id
+        bluePlayer.opponentName = matchup.ghost
+          ? `Ghost of ${redPlayer.name}`
+          : redPlayer.name
+        bluePlayer.opponentAvatar = redPlayer.avatar
+        bluePlayer.opponentTitle = redPlayer.title ?? ""
 
         if (!matchup.ghost) {
-          playerB.simulationId = simulationId
-          playerB.simulationTeamIndex = 1
-          playerB.opponents.set(
-            playerA.id,
-            (playerB.opponents.get(playerA.id) ?? 0) + 1
+          redPlayer.simulationId = simulationId
+          redPlayer.team = Team.RED_TEAM
+          redPlayer.opponents.set(
+            bluePlayer.id,
+            (redPlayer.opponents.get(bluePlayer.id) ?? 0) + 1
           )
-          playerB.opponentId = playerA.id
-          playerB.opponentName = playerA.name
-          playerB.opponentAvatar = playerA.avatar
-          playerB.opponentTitle = playerA.title ?? ""
+          redPlayer.opponentId = bluePlayer.id
+          redPlayer.opponentName = bluePlayer.name
+          redPlayer.opponentAvatar = bluePlayer.avatar
+          redPlayer.opponentTitle = bluePlayer.title ?? ""
         }
 
         this.state.simulations.set(simulation.id, simulation)

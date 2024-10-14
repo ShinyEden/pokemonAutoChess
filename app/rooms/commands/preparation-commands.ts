@@ -4,9 +4,7 @@ import { Client, matchMaker } from "colyseus"
 import { FilterQuery } from "mongoose"
 import { GameUser, IGameUser } from "../../models/colyseus-models/game-user"
 import { BotV2, IBot } from "../../models/mongo-models/bot-v2"
-import UserMetadata, {
-  IUserMetadata
-} from "../../models/mongo-models/user-metadata"
+import UserMetadata from "../../models/mongo-models/user-metadata"
 import { Role, Transfer } from "../../types"
 import {
   EloRankThreshold,
@@ -20,6 +18,8 @@ import { cleanProfanity } from "../../utils/profanity-filter"
 import { pickRandomIn } from "../../utils/random"
 import { entries, values } from "../../utils/schemas"
 import PreparationRoom from "../preparation-room"
+import { CloseCodes } from "../../types/enum/CloseCodes"
+import { getRank } from "../../utils/elo"
 
 export class OnJoinCommand extends Command<
   PreparationRoom,
@@ -35,11 +35,13 @@ export class OnJoinCommand extends Command<
         (u) => !u.isBot
       ).length
       if (numberOfHumanPlayers >= MAX_PLAYERS_PER_GAME) {
-        client.send(Transfer.KICK)
-        client.leave()
-        return // game already full
+        client.leave(CloseCodes.ROOM_FULL)
+        return
       }
-      if (this.state.ownerId == "" && this.state.gameMode === GameMode.NORMAL) {
+      if (
+        this.state.ownerId == "" &&
+        this.state.gameMode === GameMode.CUSTOM_LOBBY
+      ) {
         this.state.ownerId = auth.uid
       }
       if (this.state.users.has(auth.uid)) {
@@ -56,8 +58,7 @@ export class OnJoinCommand extends Command<
         ).length
         if (numberOfHumanPlayers >= MAX_PLAYERS_PER_GAME) {
           // lobby has been filled with someone else while waiting for the database
-          client.send(Transfer.KICK)
-          client.leave()
+          client.leave(CloseCodes.ROOM_FULL)
           return
         }
 
@@ -66,9 +67,18 @@ export class OnJoinCommand extends Command<
             this.state.minRank != null &&
             u.elo < EloRankThreshold[this.state.minRank]
           ) {
-            client.send(Transfer.KICK)
-            client.leave()
-            return // rank not high enough
+            client.leave(CloseCodes.USER_RANK_TOO_LOW)
+            return
+          }
+
+          if (
+            this.state.maxRank != null &&
+            u.elo &&
+            EloRankThreshold[getRank(u.elo)] >
+              EloRankThreshold[this.state.maxRank]
+          ) {
+            client.leave(CloseCodes.USER_RANK_TOO_HIGH)
+            return
           }
 
           this.state.users.set(
@@ -95,15 +105,14 @@ export class OnJoinCommand extends Command<
             })
           }
 
-          if (this.state.gameMode !== GameMode.NORMAL) {
+          if (this.state.gameMode !== GameMode.CUSTOM_LOBBY) {
             this.clock.setTimeout(() => {
               if (
                 this.state.users.has(u.uid) &&
                 !this.state.users.get(u.uid)!.ready
               ) {
                 this.state.users.delete(u.uid)
-                client.send(Transfer.KICK)
-                client.leave()
+                client.leave(CloseCodes.USER_KICKED) // kick clients that can't auto-ready in time. Still investigating why this happens for some people
               }
             }, 10000)
           }
@@ -181,7 +190,7 @@ export class OnGameStartRequestCommand extends Command<
         return
       }
 
-      if (!allUsersReady && this.state.gameMode === GameMode.NORMAL) {
+      if (!allUsersReady && this.state.gameMode === GameMode.CUSTOM_LOBBY) {
         this.state.addMessage({
           authorId: "Server",
           payload: `Not all players are ready.`,
@@ -273,7 +282,7 @@ export class OnNewMessageCommand extends Command<
       if (user && !user.anonymous && message != "") {
         this.state.addMessage({
           author: user.name,
-          authorId: user.id,
+          authorId: user.uid,
           avatar: user.avatar,
           payload: message
         })
@@ -370,8 +379,12 @@ export class OnToggleEloCommand extends Command<
           authorId: "server",
           payload: `Room leader ${
             noElo ? "disabled" : "enabled"
-          } ELO gain for this game.`,
+          } ELO gain for this game. Players need to ready again.`,
           avatar: leader?.avatar
+        })
+
+        this.state.users.forEach((user) => {
+          user.ready = false
         })
       }
     } catch (error) {
@@ -408,8 +421,7 @@ export class OnKickPlayerCommand extends Command<
               this.room.setMetadata({
                 blacklist: this.room.metadata.blacklist.concat(userId)
               })
-              cli.send(Transfer.KICK)
-              cli.leave()
+              cli.leave(CloseCodes.USER_KICKED)
             } else {
               this.room.state.addMessage({
                 author: "Server",
@@ -438,12 +450,7 @@ export class OnDeleteRoomCommand extends Command<
       const user = this.state.users.get(client.auth?.uid)
       if (user && [Role.ADMIN, Role.MODERATOR].includes(user.role)) {
         this.room.clients.forEach((cli) => {
-          cli.send(Transfer.KICK)
-          cli.leave()
-        })
-        this.room.clients.forEach((cli) => {
-          cli.send(Transfer.KICK)
-          cli.leave()
+          cli.leave(CloseCodes.ROOM_DELETED)
         })
         this.room.disconnect()
       }
@@ -474,10 +481,10 @@ export class OnLeaveCommand extends Command<
 
           if (client.auth.uid === this.state.ownerId) {
             const newOwner = values(this.state.users).find(
-              (user) => user.id !== this.state.ownerId && !user.isBot
+              (user) => user.uid !== this.state.ownerId && !user.isBot
             )
             if (newOwner) {
-              this.state.ownerId = newOwner.id
+              this.state.ownerId = newOwner.uid
               this.state.ownerName = newOwner.name
               this.room.setMetadata({ ownerName: this.state.ownerName })
               this.room.setName(
@@ -510,7 +517,8 @@ export class OnToggleReadyCommand extends Command<
   execute({ client, ready }) {
     try {
       // cannot toggle ready in quick play / ranked / tournament game mode
-      if (this.room.state.gameMode !== GameMode.NORMAL && ready !== true) return
+      if (this.room.state.gameMode !== GameMode.CUSTOM_LOBBY && ready !== true)
+        return
 
       // logger.debug(this.state.users.get(client.auth.uid).ready);
       if (client.auth?.uid && this.state.users.has(client.auth.uid)) {
@@ -525,7 +533,7 @@ export class OnToggleReadyCommand extends Command<
           : MAX_PLAYERS_PER_GAME
 
       if (
-        this.state.gameMode !== GameMode.NORMAL &&
+        this.state.gameMode !== GameMode.CUSTOM_LOBBY &&
         this.state.users.size === nbExpectedPlayers &&
         values(this.state.users).every((user) => user.ready)
       ) {

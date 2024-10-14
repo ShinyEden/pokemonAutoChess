@@ -66,7 +66,7 @@ export class AbilityStrategy {
     }
 
     if (pokemon.items.has(Item.STAR_DUST)) {
-      pokemon.addShield(Math.round(0.6 * pokemon.maxPP), pokemon, 0, false)
+      pokemon.addShield(Math.round(0.5 * pokemon.maxPP), pokemon, 0, false)
       pokemon.count.starDustCount++
     }
 
@@ -104,7 +104,7 @@ export function soundBoost(pokemon: PokemonEntity, board: Board) {
       pokemon.positionY,
       chimecho.positionX,
       chimecho.positionY
-    ) <= 2
+    ) <= 1
   board.forEach((x: number, y: number, ally: PokemonEntity | undefined) => {
     if (ally && pokemon.team === ally.team) {
       ally.status.sleep = false
